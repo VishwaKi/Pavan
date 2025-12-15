@@ -33,6 +33,7 @@ export default function Home() {
     const streamingMessageIdRef = useRef<string | null>(null)
     const activeChatRef = useRef<string | null>(null)
     const rootAgentRef = useRef<string | null>(null) // Track the agent that started the interaction
+    const pendingMessageRef = useRef<string | null>(null) // Queue a user message while (re)connecting
 
     const currentChat = chats.find(chat => chat.id === activeChat)
 
@@ -77,8 +78,7 @@ export default function Home() {
         }
     }, []) // Run only once on mount
 
-    // Initialize WebSocket connection ONCE on mount
-    useEffect(() => {
+    const createAndConnectWebSocket = () => {
         console.log('Initializing WebSocket connection...')
         const ws = new ChatWebSocket({
             url: WS_URL,
@@ -87,6 +87,12 @@ export default function Home() {
                 console.log('✅ Connected to WebSocket')
                 setIsConnected(true)
                 setConnectionError(null)
+
+                // Flush any queued user message
+                if (pendingMessageRef.current && wsRef.current?.isConnected()) {
+                    wsRef.current.sendMessage(pendingMessageRef.current)
+                    pendingMessageRef.current = null
+                }
             },
             onDisconnect: () => {
                 if (isUnmountingRef.current) return
@@ -118,7 +124,56 @@ export default function Home() {
 
                 console.log('📝 Extracted content:', content)
                 console.log('📋 Message type:', messageType)
+                console.log('📋 Message role:', message.role)
 
+                // Handle "Thoughts" role messages
+                if (message.role === 'Thoughts') {
+                    console.log('💭 Thought message received:', content)
+
+                    // If there's an existing thinking message, update it
+                    if (streamingMessageIdRef.current) {
+                        setChats(prev => prev.map(chat => {
+                            if (chat.id !== currentActiveChat) return chat
+
+                            return {
+                                ...chat,
+                                messages: chat.messages.map(msg =>
+                                    msg.id === streamingMessageIdRef.current
+                                        ? {
+                                            ...msg,
+                                            thinkingText: content,
+                                            thinkingSteps: [
+                                                ...(msg.thinkingSteps || []),
+                                                { text: content, timestamp: new Date() }
+                                            ]
+                                        }
+                                        : msg
+                                )
+                            }
+                        }))
+                    } else {
+                        // Create a new thinking message
+                        const thinkingMessageId = `thinking-${Date.now()}`
+                        streamingMessageIdRef.current = thinkingMessageId
+                        setChats(prev => prev.map(chat => {
+                            if (chat.id !== currentActiveChat) return chat
+                            return {
+                                ...chat,
+                                messages: [...chat.messages, {
+                                    id: thinkingMessageId,
+                                    role: 'assistant' as const,
+                                    content: '',
+                                    timestamp: new Date(),
+                                    type: 'Thoughts',
+                                    isThinking: true,
+                                    thinkingText: content,
+                                    thinkingSteps: [{ text: content, timestamp: new Date() }]
+                                }]
+                            }
+                        }))
+                    }
+                    return // Don't process further
+                }
 
                 // Handle different message types
                 // Handle different message types
@@ -298,6 +353,7 @@ export default function Home() {
                             }
                         }))
                     }
+                    setIsTyping(false)
 
                 } else if (messageType === 'UserInputRequestedEvent') {
                     // User input requested - clear thinking state
@@ -387,6 +443,7 @@ export default function Home() {
                             return chat
                         }))
                     }
+                    setIsTyping(false)
                 }
             },
             onComplete: () => {
@@ -421,6 +478,12 @@ export default function Home() {
 
         ws.connect()
         wsRef.current = ws
+        return ws
+    }
+
+    // Initialize WebSocket connection ONCE on mount
+    useEffect(() => {
+        const ws = createAndConnectWebSocket()
 
         // Cleanup ONLY on component unmount
         return () => {
@@ -441,6 +504,30 @@ export default function Home() {
         setActiveChat(newChat.id)
     }
 
+    const handleStopResponse = () => {
+        setIsTyping(false)
+        currentStreamingMessageRef.current = ''
+        streamingMessageIdRef.current = null
+        pendingMessageRef.current = null
+
+        const currentActiveChat = activeChatRef.current
+        if (currentActiveChat) {
+            setChats(prev => prev.map(chat =>
+                chat.id === currentActiveChat
+                    ? {
+                        ...chat,
+                        messages: chat.messages.filter(msg => msg.isThinking !== true)
+                    }
+                    : chat
+            ))
+        }
+
+        // Reset connection to clear any server-side stream
+        wsRef.current?.disconnect()
+        wsRef.current = null
+        createAndConnectWebSocket()
+    }
+
     const handleSendMessage = async (content: string) => {
         // If no active chat exists, this shouldn't happen now due to default chat creation
         // but we'll handle it gracefully
@@ -458,11 +545,6 @@ export default function Home() {
             return
         }
 
-        if (!wsRef.current?.isConnected()) {
-            setConnectionError('Not connected to server. Please wait...')
-            return
-        }
-
         const userMessage: Message = {
             id: Date.now().toString(),
             role: 'user',
@@ -470,29 +552,52 @@ export default function Home() {
             timestamp: new Date()
         }
 
-        // Add user message to the current chat
+        // Reset streaming state for new AI response
+        currentStreamingMessageRef.current = ''
+        const newThinkingId = `ai-${Date.now() + 1}` // +1 to ensure unique ID
+        streamingMessageIdRef.current = newThinkingId
+        setIsTyping(true)
+
+        const thinkingMessage: Message = {
+            id: newThinkingId,
+            role: 'assistant' as const,
+            content: '',
+            timestamp: new Date(),
+            isThinking: true,
+            thinkingText: undefined, // No text yet, will show dots
+            thinkingSteps: []
+        }
+
+        // Add both user message and initial thinking message in a single state update
         setChats(prev => prev.map(chat =>
             chat.id === activeChat
                 ? {
                     ...chat,
-                    messages: [...chat.messages, userMessage],
+                    messages: [...chat.messages, userMessage, thinkingMessage],
                     title: chat.messages.length === 0 ? content.slice(0, 50) : chat.title
                 }
                 : chat
         ))
 
-        // Reset streaming state for new AI response
-        currentStreamingMessageRef.current = ''
-        streamingMessageIdRef.current = `ai-${Date.now()}`
-        setIsTyping(true)
+        // If socket is not connected, reconnect and queue the message
+        if (!wsRef.current?.isConnected()) {
+            pendingMessageRef.current = content
+            setConnectionError('Reconnecting to server. Your message will send shortly...')
+            if (!wsRef.current) {
+                createAndConnectWebSocket()
+            }
+            return
+        }
 
         // Send message via WebSocket
         try {
             wsRef.current.sendMessage(content)
+            pendingMessageRef.current = null
         } catch (error) {
             console.error('Error sending message:', error)
             setIsTyping(false)
             setConnectionError('Failed to send message')
+            pendingMessageRef.current = null
         }
     }
 
@@ -593,17 +698,6 @@ export default function Home() {
                             {currentChat.messages.map((message) => (
                                 <ChatMessage key={message.id} message={message} />
                             ))}
-                            {isTyping && (
-                                <ChatMessage
-                                    message={{
-                                        id: 'typing',
-                                        role: 'assistant',
-                                        content: '',
-                                        timestamp: new Date()
-                                    }}
-                                    isTyping={true}
-                                />
-                            )}
                             <div ref={messagesEndRef} />
                         </>
                     )}
@@ -621,7 +715,9 @@ export default function Home() {
 
                 <ChatInput
                     onSendMessage={handleSendMessage}
-                    disabled={isTyping || !isConnected}
+                    onStop={handleStopResponse}
+                    isTyping={isTyping}
+                    disabled={isTyping}
                 />
             </div>
         </div>

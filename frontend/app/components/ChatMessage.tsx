@@ -48,7 +48,8 @@ export default function ChatMessage({ message, isTyping = false }: ChatMessagePr
     // Determine if this is a thinking/processing message
     const isThinkingMessage = message.isThinking ||
         message.type === 'ToolCallRequestEvent' ||
-        message.type === 'ToolCallExecutionEvent'
+        message.type === 'ToolCallExecutionEvent' ||
+        message.type === 'Thoughts'
 
     // Get the thinking text based on message type
     const getThinkingText = () => {
@@ -61,13 +62,17 @@ export default function ChatMessage({ message, isTyping = false }: ChatMessagePr
                 return 'Tool is execution...' // Fallback
             case 'ToolCallSummaryMessage':
                 return 'Analyzing results...'
+            case 'Thoughts':
+                return 'Thinking...'
             default:
                 return 'Thinking...'
         }
     }
 
-    // Check if we should show ONLY text (no dots) for tool events
-    const showTextOnly = message.type === 'ToolCallRequestEvent' || message.type === 'ToolCallExecutionEvent'
+    // Check if we should show ONLY text (no dots) for tool events or thoughts with content
+    const showTextOnly = message.type === 'ToolCallRequestEvent' ||
+        message.type === 'ToolCallExecutionEvent' ||
+        (message.type === 'Thoughts' && message.thinkingText)
 
     return (
         <div className={`${styles['message-container']} ${styles[message.role]}`}>
@@ -83,7 +88,74 @@ export default function ChatMessage({ message, isTyping = false }: ChatMessagePr
                     <span className={styles.timestamp}>{formatTime(message.timestamp)}</span>
                 </div>
 
-                {isTyping || isThinkingMessage ? (
+                {/* Show collapsible thoughts section if there are thinking steps */}
+                {message.thinkingSteps && message.thinkingSteps.length > 0 && (
+                    <div className={styles['thoughts-section']}>
+                        <button
+                            className={styles['thoughts-toggle']}
+                            onClick={() => setShowThoughts(!showThoughts)}
+                        >
+                            <svg
+                                className={`${styles['chevron-icon']} ${showThoughts ? styles.expanded : ''}`}
+                                fill="none"
+                                stroke="currentColor"
+                                viewBox="0 0 24 24"
+                            >
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                            </svg>
+                            <span className={styles['thoughts-label']}>💭 Thoughts</span>
+                            <span className={styles['thoughts-count']}>({message.thinkingSteps.length})</span>
+                        </button>
+
+                        {showThoughts && (
+                            <div className={styles['thoughts-content']}>
+                                {message.thinkingSteps.map((step, index) => (
+                                    <div key={index} className={styles['thought-step']}>
+                                        <div className={styles['step-indicator']}>
+                                            <div className={styles['step-number']}>{index + 1}</div>
+                                            {index < message.thinkingSteps!.length - 1 && (
+                                                <div className={styles['step-line']}></div>
+                                            )}
+                                        </div>
+                                        <div className={styles['step-content']}>
+                                            <div className={styles['step-text']}>
+                                                <ReactMarkdown
+                                                    components={{
+                                                        code({ node, className, children, ...props }: any) {
+                                                            const match = /language-(\w+)/.exec(className || '')
+                                                            return match ? (
+                                                                <SyntaxHighlighter
+                                                                    style={vscDarkPlus as any}
+                                                                    language={match[1]}
+                                                                    PreTag="div"
+                                                                    {...props}
+                                                                >
+                                                                    {String(children).replace(/\n$/, '')}
+                                                                </SyntaxHighlighter>
+                                                            ) : (
+                                                                <code className={className} {...props}>
+                                                                    {children}
+                                                                </code>
+                                                            )
+                                                        }
+                                                    }}
+                                                >
+                                                    {step.text}
+                                                </ReactMarkdown>
+                                            </div>
+                                            <span className={styles['step-time']}>
+                                                {formatTime(step.timestamp)}
+                                            </span>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                )}
+
+                {/* Show thinking indicator ONLY if there's no content yet */}
+                {(isTyping || isThinkingMessage) && !message.content ? (
                     <div className={styles['thinking-container']}>
                         {!showTextOnly && (
                             <div className={styles['thinking-indicator']}>
@@ -96,74 +168,11 @@ export default function ChatMessage({ message, isTyping = false }: ChatMessagePr
                             {getThinkingText()}
                         </span>
                     </div>
-                ) : (
+                ) : null}
+
+                {/* Show actual content if it exists */}
+                {message.content && (
                     <>
-                        {/* Show collapsible thoughts section if there are thinking steps */}
-                        {message.thinkingSteps && message.thinkingSteps.length > 0 && (
-                            <div className={styles['thoughts-section']}>
-                                <button
-                                    className={styles['thoughts-toggle']}
-                                    onClick={() => setShowThoughts(!showThoughts)}
-                                >
-                                    <svg
-                                        className={`${styles['chevron-icon']} ${showThoughts ? styles.expanded : ''}`}
-                                        fill="none"
-                                        stroke="currentColor"
-                                        viewBox="0 0 24 24"
-                                    >
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                                    </svg>
-                                    <span className={styles['thoughts-label']}>💭 Thoughts</span>
-                                    <span className={styles['thoughts-count']}>({message.thinkingSteps.length})</span>
-                                </button>
-
-                                {showThoughts && (
-                                    <div className={styles['thoughts-content']}>
-                                        {message.thinkingSteps.map((step, index) => (
-                                            <div key={index} className={styles['thought-step']}>
-                                                <div className={styles['step-indicator']}>
-                                                    <div className={styles['step-number']}>{index + 1}</div>
-                                                    {index < message.thinkingSteps!.length - 1 && (
-                                                        <div className={styles['step-line']}></div>
-                                                    )}
-                                                </div>
-                                                <div className={styles['step-content']}>
-                                                    <div className={styles['step-text']}>
-                                                        <ReactMarkdown
-                                                            components={{
-                                                                code({ node, className, children, ...props }: any) {
-                                                                    const match = /language-(\w+)/.exec(className || '')
-                                                                    return match ? (
-                                                                        <SyntaxHighlighter
-                                                                            style={vscDarkPlus as any}
-                                                                            language={match[1]}
-                                                                            PreTag="div"
-                                                                            {...props}
-                                                                        >
-                                                                            {String(children).replace(/\n$/, '')}
-                                                                        </SyntaxHighlighter>
-                                                                    ) : (
-                                                                        <code className={className} {...props}>
-                                                                            {children}
-                                                                        </code>
-                                                                    )
-                                                                }
-                                                            }}
-                                                        >
-                                                            {step.text}
-                                                        </ReactMarkdown>
-                                                    </div>
-                                                    <span className={styles['step-time']}>
-                                                        {formatTime(step.timestamp)}
-                                                    </span>
-                                                </div>
-                                            </div>
-                                        ))}
-                                    </div>
-                                )}
-                            </div>
-                        )}
-
                         <div className={styles['message-text']}>
                             {/* If message type is ToolCallSummaryMessage, render as HTML for tables */}
                             {message.type === 'ToolCallSummaryMessage' ? (
